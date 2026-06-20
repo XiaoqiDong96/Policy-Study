@@ -37,6 +37,17 @@ git push
 
 If `git push` asks for authentication, complete GitHub login locally once. After that, future pushes should normally work without repeating the full login.
 
+## First Full Push To Policy-Study
+
+The remote repository may already contain a README-only test commit. The first full upload from this local package can safely replace it:
+
+```bash
+cd "/Users/xiaoqidong/Documents/法律法规处理/github_core/nev-policy-workflow"
+git push --force-with-lease -u origin main
+```
+
+Use `--force-with-lease` only for this first full upload, because the remote repository has no real work besides the test README. After the full package is on GitHub, use normal `git push`.
+
 ## Files Synced
 
 - `scripts/build_fulltext_candidates.py`
@@ -50,4 +61,3 @@ If `git push` asks for authentication, complete GitHub login locally once. After
 - `outputs/cloud_runbooks/start_stage1_minimax_adaptive.sh`
 
 Raw data, model outputs, SSH keys, and generated Excel/JSONL files are intentionally not synced.
-
