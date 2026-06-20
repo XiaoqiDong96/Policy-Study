@@ -1,0 +1,6 @@
+beautifulsoup4>=4.12
+ijson>=3.2
+json-repair>=0.40
+openpyxl>=3.1
+cpca>=0.5
+

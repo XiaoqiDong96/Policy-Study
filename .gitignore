@@ -1,0 +1,26 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.pem
+*.key
+*.crt
+
+# Raw corpora and generated outputs
+*.json
+*.jsonl
+*.xlsx
+*.xls
+*.csv
+*.zip
+*.tar
+*.tar.gz
+outputs/
+data/
+raw/
+models/
+ollama_mirror_models/
+.codex_deps/
+
