@@ -48,6 +48,9 @@ except Exception as exc:  # pragma: no cover - dependency error is user-facing.
     ) from exc
 
 
+DOMAIN_LABEL = "NEV"
+
+
 ADMIN_PROVINCES = {
     "北京市",
     "天津市",
@@ -341,6 +344,58 @@ STANDARD_USER_PROMPT_TEMPLATE = USER_PROMPT_TEMPLATE.replace(
     "adversarial_not_policy_case\": \"最强反方理由，20-80字\"",
     "adversarial_not_policy_case\": \"若判否或有误判风险，简述排除/风险理由，20-80字\"",
 )
+
+BOUNDARY_VOTE_SYSTEM_PROMPT = """你是严谨的中国产业政策研究助理。任务只做边界样本的第二票复核：判断给定政府文件是否属于“新能源汽车产业政策”。
+
+采用 Fang, Li, and Lu (2025), Decoding China's Industrial Policies 的窄口径定义：产业政策是政府为了改变长期经济结构，对特定产业或特定经济活动采取的选择性、定向性干预。
+
+必须同时满足：
+1. 主体是政府或政府部门。
+2. 文件本身包含政策措施，或正式、明确、直接针对新能源汽车产业的导向性政策安排。
+3. 直接目标是新能源汽车整车、纯电/插混/燃料电池汽车、动力电池、车用氢能、充换电/换电基础设施，或与新能源汽车直接绑定的智能网联汽车。
+4. 意在影响长期经济结构或资源配置。
+
+正式规划、纲要、指导意见、行动计划中，如果把新能源汽车或直接产业链列为优先方向、重点任务、重大工程、发展目标、产业布局或资源配置方向，即使没有补贴细则，也可判为产业政策。
+
+排除：人大政协建议/提案答复、预算/决算/统计/年度报告/工作总结、会议培训竞赛通知、名单公告、一般交通/环保/数字经济/科技创新/智慧城市政策。除非该文件本身同步发布针对新能源汽车的实施方案、办法、标准、目录、资金申报或监管规则，否则判否。不要把正文中引用或回顾的既有政策当成本文件政策。
+
+只输出一个 JSON 对象，不要输出解释性正文。"""
+
+BOUNDARY_VOTE_USER_PROMPT_TEMPLATE = """请只做第二票：判断以下文件是否属于“新能源汽车产业政策”。
+
+如果证据不足、只是提及新能源汽车、只是回顾既有政策、或不是文件本身出台政策，请判否。
+
+返回 JSON 字段：
+{{
+  "is_nev_related": true,
+  "is_industrial_policy": true,
+  "confidence_is_nev_related": 0.0,
+  "confidence_is_industrial_policy": 0.0,
+  "classification_confidence": 0.0,
+  "false_positive_risk": "low",
+  "adversarial_not_policy_case": "若判否或有误判风险，简述理由，20-80字",
+  "decision_reason": "结论=是；或结论=否；20-100字",
+  "direct_target_evidence": "证明新能源汽车直接目标的原文短语；若无则为空",
+  "measure_or_guidance_evidence": "证明政策措施或导向安排的原文短语；若无则为空"
+}}
+
+置信度含义：
+- confidence_is_industrial_policy 表示“是产业政策”的概率；明确否应接近 0，明确是应接近 1。
+- classification_confidence 表示对最终是/否判断的把握；明确否也可以是 0.8 以上。
+
+元数据：
+id: {doc_id}
+title: {title}
+province_field: {province}
+pub_depart: {pub_depart}
+law_type: {law_type}
+pub_date: {pub_date}
+use_date: {use_date}
+category: {category_1} / {category_2}
+
+正文输入（短文档为全文；长文档为证据保留式压缩摘要）：
+{body}
+"""
 
 
 def norm_space(text: str) -> str:
@@ -1415,11 +1470,17 @@ def prompt_mode(args: argparse.Namespace) -> str:
 
 
 def system_prompt_for_args(args: argparse.Namespace) -> str:
-    return STANDARD_SYSTEM_PROMPT if prompt_mode(args) == "standard" else SYSTEM_PROMPT
+    mode = prompt_mode(args)
+    if mode == "boundary_vote":
+        return BOUNDARY_VOTE_SYSTEM_PROMPT
+    return STANDARD_SYSTEM_PROMPT if mode == "standard" else SYSTEM_PROMPT
 
 
 def user_prompt_template_for_args(args: argparse.Namespace) -> str:
-    return STANDARD_USER_PROMPT_TEMPLATE if prompt_mode(args) == "standard" else USER_PROMPT_TEMPLATE
+    mode = prompt_mode(args)
+    if mode == "boundary_vote":
+        return BOUNDARY_VOTE_USER_PROMPT_TEMPLATE
+    return STANDARD_USER_PROMPT_TEMPLATE if mode == "standard" else USER_PROMPT_TEMPLATE
 
 
 def run_model_classification(candidate: Dict[str, Any], args: argparse.Namespace, model: str) -> Dict[str, Any]:
@@ -2964,7 +3025,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_classify = sub.add_parser("classify", help="Stream input JSON and classify NEV policy candidates.")
+    p_classify = sub.add_parser(
+        "classify", help=f"Stream input JSON and classify {DOMAIN_LABEL} policy candidates."
+    )
     p_classify.add_argument("--input", required=True)
     p_classify.add_argument("--output-dir", default="outputs/nev_policy_panel")
     p_classify.add_argument("--json-prefix", default="item")
@@ -2973,7 +3036,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     p_classify.add_argument(
         "--existing-candidates",
         default="",
-        help="Use an already screened NEV candidate JSONL instead of scanning the source JSON again.",
+        help=f"Use an already screened {DOMAIN_LABEL} candidate JSONL instead of scanning the source JSON again.",
     )
     p_classify.add_argument("--model", default="qwen3:4b-mirror")
     p_classify.add_argument(
@@ -2983,9 +3046,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     p_classify.add_argument(
         "--prompt-mode",
-        choices=["standard", "adversarial"],
+        choices=["standard", "adversarial", "boundary_vote"],
         default="standard",
-        help="standard = independent structured coding; adversarial = include explicit strongest-not-policy reasoning.",
+        help="standard = independent structured coding; adversarial = include explicit strongest-not-policy reasoning; boundary_vote = compact second-vote yes/no prompt.",
     )
     p_classify.add_argument(
         "--parallel-models",

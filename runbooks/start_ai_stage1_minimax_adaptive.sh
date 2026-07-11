@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 cd ~/nev_policy_project
 . .venv/bin/activate
+
 python scripts/ollama_cloud_adaptive_runner.py \
-  --candidates outputs/policy_packages/new_energy_vehicle_evidence_pack/candidates_evidence_pack.jsonl \
-  --output-dir outputs/nev_policy_panel/stage1_minimax_adaptive \
-  --candidates-name nev_stage1_candidates_norm.jsonl \
-  --classified-name nev_stage1_minimax.jsonl \
+  --pipeline-script scripts/ai_policy_pipeline.py \
+  --candidates outputs/policy_packages/artificial_intelligence/candidates.jsonl \
+  --output-dir outputs/ai_policy_panel/stage1_minimax_adaptive \
+  --candidates-name ai_stage1_candidates_norm.jsonl \
+  --classified-name ai_stage1_minimax.jsonl \
   --model minimax-m2.5:cloud \
   --initial-parallel-docs 8 \
   --min-parallel-docs 2 \

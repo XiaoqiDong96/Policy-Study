@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PIPELINE = PROJECT_ROOT / "scripts" / "nev_policy_pipeline.py"
+DEFAULT_PIPELINE = PROJECT_ROOT / "scripts" / "nev_policy_pipeline.py"
 
 
 @dataclass
@@ -97,14 +97,21 @@ def scan_log(path: Path, offset: int) -> tuple[LogSignals, int]:
     signals.short_rate_limit = len(re.findall(r"limit_kind=short_rate_limit|rate limit|queue is full", lower))
     signals.session_limit = len(re.findall(r"limit_kind=session_limit|session limit|5[- ]?hour|five hour", lower))
     signals.weekly_limit = len(re.findall(r"limit_kind=weekly_limit|weekly limit|7[- ]?day|seven day", lower))
-    signals.all_failed_rows = len(re.findall(r"all_failed=[1-9]", lower))
+    # Classifier progress lines report cumulative "all_failed=N" counts.
+    # Treating those summaries as fresh chunk errors causes repeated false
+    # degradation after the first failed row. Keep this signal informational
+    # unless a future classifier emits an explicit row-failure marker.
+    signals.all_failed_rows = len(re.findall(r"\[all_failed_row\]|\[llm_all_failed\]", lower))
     return signals, new_offset
 
 
 def build_classify_command(args: argparse.Namespace, max_candidates: int, parallel_docs: int) -> List[str]:
+    pipeline = Path(args.pipeline_script)
+    if not pipeline.is_absolute():
+        pipeline = PROJECT_ROOT / pipeline
     cmd = [
         sys.executable,
-        str(PIPELINE),
+        str(pipeline),
         "classify",
         "--input",
         "dummy",
@@ -191,6 +198,11 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--candidates-name", default="nev_candidates_adaptive_norm.jsonl")
     parser.add_argument("--classified-name", default="nev_classified_adaptive.jsonl")
+    parser.add_argument(
+        "--pipeline-script",
+        default=str(DEFAULT_PIPELINE),
+        help="Classifier script to run in each chunk. Use scripts/ai_policy_pipeline.py for AI policy runs.",
+    )
     parser.add_argument("--model", default="minimax-m2.5:cloud")
     parser.add_argument("--models", default="")
     parser.add_argument("--prompt-mode", default="standard", choices=["standard", "adversarial"])
@@ -310,7 +322,7 @@ def main() -> None:
                 flush=True,
             )
             sleep_with_countdown(sleep_for, "short_rate_limit", state_path, state)
-        elif rc != 0 or signals.all_failed_rows:
+        elif rc != 0:
             old = parallel_docs
             parallel_docs = max(args.min_parallel_docs, parallel_docs - 1)
             clean_chunks = 0

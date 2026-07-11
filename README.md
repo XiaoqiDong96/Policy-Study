@@ -1,37 +1,43 @@
-# NEV Policy Workflow
+# China Industry Policy Workflow
 
-Core code for screening Chinese policy documents related to new energy vehicles (NEV), classifying whether candidates are industrial policies with LLMs, and producing auditable panel-style outputs.
+An auditable workflow for identifying industry-related Chinese policy documents, determining whether they are industrial policies, classifying policy instruments, and building monthly policy panels.
 
-This repository intentionally excludes raw legal-regulation corpora, model outputs, cloud keys, API tokens, generated Excel files, and large JSONL packages.
+The repository contains reusable code and methodological documentation. It does not contain the source legal-regulation corpus, row-level research data, model responses, panel outputs, credentials, or machine-specific configuration.
 
-## What Is Included
+## Supported domains
 
-- `scripts/screen_related_policy_packages.py`  
-  BeautifulSoup + keyword/rule-based screening for NEV and AI policy candidates.
-- `scripts/build_fulltext_candidates.py`  
-  Backfills full text for previously screened candidate IDs from the original large corpus.
-- `scripts/nev_policy_pipeline.py`  
-  Main pipeline for deterministic evidence packs, LLM classification, adversarial prompts, tool classification, administrative-level panel construction, and resumable output.
-- `scripts/ollama_cloud_adaptive_runner.py`  
-  Adaptive cloud runner for long Ollama jobs. It resumes JSONL output, handles 429/session/weekly limit signals, and adjusts concurrency.
-- `scripts/materialize_nev_audit_outputs.py`  
-  Converts JSONL classification results into per-document text files, Excel review files, and folders for disagreement/boundary samples.
-- `docs/`  
-  Chinese documentation explaining keyword screening, LLM judgment logic, and the full workflow.
-- `runbooks/`  
-  Minimal shell entry point for the current MiniMax first-stage cloud run.
+- New energy vehicles
+- Artificial intelligence
+- Six future-industry groups
+- Low-altitude economy
+- Cultural and related industries
 
-## Data Not Included
+The domain layer is configurable, so the same pipeline can be extended to another industry without rewriting the classification engine.
 
-The pipeline expects local files such as:
+## Workflow
 
-- Raw corpus JSON, for example `法律法规文件库.json`
-- Candidate packages such as `outputs/policy_packages/new_energy_vehicle_evidence_pack/candidates_evidence_pack.jsonl`
-- Classification outputs under `outputs/`
+```text
+Raw policy corpus
+  -> deterministic HTML/text cleaning
+  -> high-recall domain screening
+  -> evidence-pack construction for long documents
+  -> Stage 1 industrial-policy classification
+  -> Stage 2 review of boundary cases
+  -> policy-instrument classification
+  -> central/provincial/prefecture monthly panels
+  -> disagreement and audit samples
+```
 
-These are excluded because they are too large and may contain sensitive or licensed source material.
+Screening is deterministic and does not consume model quota. LLM stages are resumable JSONL jobs, and completed records are preserved across restarts.
 
-## Install
+## Repository layout
+
+- `scripts/`: screening, classification, review, tool coding, panel construction, and limit protection
+- `runbooks/`: shell entry points for local or remote execution
+- `docs/`: methodology and extension notes
+- `requirements.txt`: Python dependencies
+
+## Installation
 
 ```bash
 python3 -m venv .venv
@@ -39,73 +45,74 @@ python3 -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Optional but recommended for LLM classification:
+For model-backed stages, install Ollama separately, sign in if cloud models are used, and verify that the configured model is available:
 
 ```bash
 ollama serve
+ollama list
 ```
 
-For Ollama Cloud, sign in on the machine that will run classification:
+No API key or token should be written into this repository. Use the model provider's login mechanism or environment variables on the execution machine.
+
+## Minimal examples
+
+Set paths outside the repository:
 
 ```bash
-ollama signin
+export POLICY_CORPUS="${DATA_ROOT}/policy_corpus.json"
+export POLICY_OUTPUT="${OUTPUT_ROOT}/policy_workflow"
 ```
 
-## Typical Workflow
-
-1. Screen candidate policies from the raw corpus:
+Screen future-industry and low-altitude candidates without an LLM:
 
 ```bash
-python scripts/screen_related_policy_packages.py \
-  --input /path/to/法律法规文件库.json \
-  --output-dir outputs/policy_packages
+python scripts/screen_future_low_altitude_policy_packages.py \
+  --input "${POLICY_CORPUS}" \
+  --output-root "${POLICY_OUTPUT}/candidates"
 ```
 
-2. Build or backfill full-text/evidence-pack candidates:
+Screen cultural-industry candidates:
 
 ```bash
-python scripts/build_fulltext_candidates.py \
-  --corpus /path/to/法律法规文件库.json \
-  --candidates outputs/policy_packages/new_energy_vehicle/candidates.jsonl \
-  --output outputs/policy_packages/new_energy_vehicle_fulltext/candidates_fulltext.jsonl
+python scripts/screen_culture_industry_policy_packages.py \
+  --input "${POLICY_CORPUS}" \
+  --output-root "${POLICY_OUTPUT}/culture_candidates"
 ```
 
-3. Run classification with resume support:
+Run the generic industrial-policy classifier for a configured domain:
 
 ```bash
-python scripts/nev_policy_pipeline.py classify \
+python scripts/domain_policy_pipeline.py classify \
+  --domain-key future_industries \
   --input dummy \
-  --existing-candidates outputs/policy_packages/new_energy_vehicle_evidence_pack/candidates_evidence_pack.jsonl \
-  --output-dir outputs/nev_policy_panel/stage1_minimax_adaptive \
-  --candidates-name nev_stage1_candidates_norm.jsonl \
-  --classified-name nev_stage1_minimax.jsonl \
+  --existing-candidates "${POLICY_OUTPUT}/candidates/future_industries/candidates.jsonl" \
+  --output-dir "${POLICY_OUTPUT}/future_industries/stage1" \
   --model minimax-m2.5:cloud \
   --prompt-mode standard \
-  --parallel-docs 8 \
-  --ollama-format auto \
-  --long-doc-mode evidence_pack \
-  --num-ctx 16384 \
-  --max-body-chars 8000 \
+  --parallel-docs 4 \
   --resume
 ```
 
-4. For long cloud runs, use the adaptive runner:
+Runbook defaults are examples. Review model names, concurrency, context length, and output roots before a full run.
 
-```bash
-bash runbooks/start_stage1_minimax_adaptive.sh
-```
+## Output contract
 
-5. Materialize audit outputs:
+The pipeline writes generated files outside version control. Depending on the domain and stage, outputs include:
 
-```bash
-python scripts/materialize_nev_audit_outputs.py \
-  --classified outputs/nev_policy_panel/stage1_minimax_adaptive/nev_stage1_minimax.jsonl \
-  --output-dir outputs/nev_policy_panel/audit_materials
-```
+- candidate JSONL with screening evidence
+- one classification record per document
+- boundary-case and disagreement subsets
+- policy-instrument labels and supporting excerpts
+- document-level audit tables
+- monthly panels by administrative level and industry category
 
-## Notes
+National, provincial, and prefecture policies are kept as separate panels. A national policy is not mechanically duplicated into every city unless a downstream research design explicitly requests that transformation.
 
-- The current first-stage strategy is fast single-model MiniMax screening, followed by multi-model review only for boundary, low-confidence, or non-unanimous cases.
-- `--proactive-session-break-minutes` defaults to `0`; the runner waits only when real rate/session/weekly limit signals appear.
-- Panel construction separates central, provincial, and prefecture-level policy panels rather than spreading national policies mechanically into every city panel.
+## Extending the workflow
+
+Start with [Extending to a New Industry](docs/EXTENDING_TO_A_NEW_INDUSTRY.md). Define the domain taxonomy and exclusion boundary first, audit a sample of deterministic screening results, then configure the shared LLM and panel stages.
+
+## Public repository boundary
+
+Only code, small synthetic fixtures, and public documentation belong here. Keep all original documents, candidate packages, classifications, panels, logs, model caches, credentials, and execution-specific paths outside the repository.
 

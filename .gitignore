@@ -1,26 +1,51 @@
 .DS_Store
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
 .venv/
 venv/
+node_modules/
+
+# Credentials and local configuration
 .env
+.env.*
+!.env.example
 *.pem
 *.key
-*.crt
+*.p12
+*.pfx
+credentials/
+secrets/
 
-# Raw corpora and generated outputs
-*.json
-*.jsonl
-*.xlsx
-*.xls
-*.csv
-*.zip
-*.tar
-*.tar.gz
-outputs/
+# Raw corpora, row-level data, generated outputs, and model assets
 data/
+data_raw/
+data_work/
 raw/
+outputs/
+output/
+results/
+logs/
 models/
 ollama_mirror_models/
-.codex_deps/
+*.jsonl
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+*.dta
+*.sav
+*.sqlite
+*.sqlite3
+*.db
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+
+# Local research summaries are not part of the code release
+docs/*数据说明与统计.md
 

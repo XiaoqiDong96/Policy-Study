@@ -1,8 +1,8 @@
-# Cloud Run Notes
+# Remote execution
 
-This project can be run on a remote Linux server with Ollama installed and signed in.
+The same scripts can run on a persistent Linux host. Keep connection details, SSH keys, source documents, and generated outputs outside the repository.
 
-## Minimal Setup
+## Prepare the host
 
 ```bash
 sudo apt update
@@ -10,30 +10,28 @@ sudo apt install -y python3-venv tmux
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
-ollama signin
 ```
 
-Upload the repository code plus the required local candidate JSONL files, then start a resumable tmux job:
+Install Ollama separately and sign in on the execution host when using cloud models.
+
+## Start a resumable job
+
+From the repository root:
 
 ```bash
-tmux new-session -d -s nev_stage1_minimax_adaptive \
-  "bash -lc 'cd ~/nev_policy_project && bash runbooks/start_stage1_minimax_adaptive.sh 2>&1 | tee -a logs/nev_stage1_minimax_adaptive.tmux.log'"
+tmux new-session -d -s policy_stage1 \
+  "bash -lc '. .venv/bin/activate && bash runbooks/start_stage1_minimax_adaptive.sh'"
 ```
 
-Check progress:
+Use environment variables or command-line arguments to point to candidate and output locations. Do not edit private paths or credentials into runbooks.
+
+## Inspect and resume
 
 ```bash
-wc -l outputs/nev_policy_panel/stage1_minimax_adaptive/nev_stage1_minimax.jsonl
-tail -n 80 outputs/nev_policy_panel/stage1_minimax_adaptive/adaptive_runner.log
-cat outputs/nev_policy_panel/stage1_minimax_adaptive/adaptive_state.json
 tmux ls
+tail -n 80 "${RUN_LOG}"
+wc -l "${CLASSIFIED_JSONL}"
 ```
 
-Stop safely:
-
-```bash
-tmux kill-session -t nev_stage1_minimax_adaptive
-```
-
-Restarting the same command is safe when `--resume` is enabled; completed JSONL rows are preserved.
+Stopping the tmux session does not remove completed JSONL rows. Restart the same command with resume enabled to continue from the existing output.
 
