@@ -47,6 +47,7 @@ SKIP_COMMAND_RE = re.compile(
     r"ollama_limit_guard\.py|domain_workflow_status_server\.py|status_server\.py)",
     re.IGNORECASE,
 )
+PASSIVE_LEAF_RE = re.compile(r"(?:^|\s)(?:tee|cat|tail)(?:\s|$)")
 
 
 def run(
@@ -233,6 +234,7 @@ def discover_groups() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
                 "pgid": pgid,
                 "reasons": [],
                 "identities": [],
+                "freeze_targets": [],
                 "command_preview": commands[:1200],
                 "stopped": False,
             },
@@ -250,6 +252,41 @@ def discover_groups() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
                     "cmd": row["cmd"][:500],
                 }
             )
+
+        member_pids = {row["pid"] for row in members}
+        parents_with_children = {
+            row["ppid"] for row in members if row["ppid"] in member_pids
+        }
+        leaves = [row for row in members if row["pid"] not in parents_with_children]
+        targets = [row for row in leaves if not PASSIVE_LEAF_RE.search(row["cmd"])]
+        if not targets:
+            targets = [
+                row
+                for row in members
+                if row["pid"] != pgid and not PASSIVE_LEAF_RE.search(row["cmd"])
+            ]
+        if not targets:
+            targets = members
+        known_targets = {
+            (entry["pid"], entry["start_ticks"]) for entry in item["freeze_targets"]
+        }
+        for row in targets:
+            identity = (row["pid"], row["start_ticks"])
+            if identity in known_targets:
+                continue
+            item["freeze_targets"].append(
+                {
+                    "pid": row["pid"],
+                    "start_ticks": row["start_ticks"],
+                    "cmd": row["cmd"][:500],
+                }
+            )
+        item["stopped"] = bool(item["freeze_targets"]) and all(
+            snapshot.get(int(target["pid"]), {}).get("state") in {"T", "t"}
+            for target in item["freeze_targets"]
+            if snapshot.get(int(target["pid"]), {}).get("start_ticks")
+            == int(target["start_ticks"])
+        )
 
     for pane in panes:
         if SKIP_SESSION_RE.search(pane["session"]):
@@ -297,44 +334,76 @@ def discover_groups() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     )
 
 
-def identity_is_alive(group: dict[str, Any]) -> bool:
-    snapshot = proc_snapshot()
-    pgid = int(group["pgid"])
-    for identity in group.get("identities", []):
-        row = snapshot.get(int(identity["pid"]))
-        if (
-            row
-            and row["pgid"] == pgid
-            and row["start_ticks"] == int(identity["start_ticks"])
-        ):
-            return True
-    return False
+def matching_process(
+    snapshot: dict[int, dict[str, Any]], identity: dict[str, Any], pgid: int
+) -> dict[str, Any] | None:
+    row = snapshot.get(int(identity["pid"]))
+    if (
+        row
+        and row["pgid"] == pgid
+        and row["start_ticks"] == int(identity["start_ticks"])
+    ):
+        return row
+    return None
 
 
 def stop_group(group: dict[str, Any]) -> tuple[bool, str]:
     pgid = int(group["pgid"])
     if pgid == os.getpgrp():
         return False, "refused_to_stop_guard_group"
-    try:
-        os.killpg(pgid, signal.SIGSTOP)
-        return True, "stopped"
-    except ProcessLookupError:
-        return False, "already_exited"
-    except PermissionError:
-        return False, "permission_denied"
+    targets = group.get("freeze_targets", [])
+    if not targets:
+        return False, "no_freeze_targets"
+    before = proc_snapshot()
+    attempted = 0
+    errors: list[str] = []
+    for identity in targets:
+        row = matching_process(before, identity, pgid)
+        if not row:
+            continue
+        attempted += 1
+        try:
+            os.kill(int(identity["pid"]), signal.SIGSTOP)
+        except ProcessLookupError:
+            errors.append(f"pid={identity['pid']}:exited")
+        except PermissionError:
+            errors.append(f"pid={identity['pid']}:permission_denied")
+    time.sleep(0.05)
+    after = proc_snapshot()
+    verified = sum(
+        1
+        for identity in targets
+        if (row := matching_process(after, identity, pgid)) and row["state"] in {"T", "t"}
+    )
+    ok = attempted > 0 and verified == attempted and not errors
+    detail = f"verified_stopped={verified}/{attempted}"
+    if errors:
+        detail += ";" + ",".join(errors)
+    return ok, detail
 
 
 def continue_group(group: dict[str, Any]) -> tuple[bool, str]:
     pgid = int(group["pgid"])
-    if not identity_is_alive(group):
-        return False, "original_group_not_alive"
-    try:
-        os.killpg(pgid, signal.SIGCONT)
-        return True, "continued"
-    except ProcessLookupError:
-        return False, "already_exited"
-    except PermissionError:
-        return False, "permission_denied"
+    targets = group.get("freeze_targets", [])
+    snapshot = proc_snapshot()
+    resumed = 0
+    errors: list[str] = []
+    for identity in targets:
+        if not matching_process(snapshot, identity, pgid):
+            continue
+        try:
+            os.kill(int(identity["pid"]), signal.SIGCONT)
+            resumed += 1
+        except ProcessLookupError:
+            errors.append(f"pid={identity['pid']}:exited")
+        except PermissionError:
+            errors.append(f"pid={identity['pid']}:permission_denied")
+    if resumed:
+        detail = f"continued={resumed}"
+        if errors:
+            detail += ";" + ",".join(errors)
+        return not errors, detail
+    return False, "original_targets_not_alive"
 
 
 def merge_groups(
@@ -353,6 +422,15 @@ def merge_groups(
             entry
             for entry in item["identities"]
             if (entry["pid"], entry["start_ticks"]) not in known
+        )
+        existing_targets = {
+            (entry["pid"], entry["start_ticks"])
+            for entry in target.get("freeze_targets", [])
+        }
+        target.setdefault("freeze_targets", []).extend(
+            entry
+            for entry in item.get("freeze_targets", [])
+            if (entry["pid"], entry["start_ticks"]) not in existing_targets
         )
     return sorted(merged.values(), key=lambda item: int(item["pgid"]))
 
