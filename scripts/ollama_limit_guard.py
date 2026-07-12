@@ -9,6 +9,7 @@ server, and status dashboards running.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -17,8 +18,10 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,7 @@ EVENTS_PATH = STATE_DIR / "events.jsonl"
 ARCHIVE_DIR = STATE_DIR / "archive"
 AUTO_RESUME_LOG = STATE_DIR / "auto_resume.log"
 AUTO_ENFORCE_LOG = STATE_DIR / "auto_enforce.log"
+LOCK_PATH = STATE_DIR / "guard.lock"
 
 MARKER_RE = re.compile(
     r"(?:"
@@ -75,12 +79,35 @@ def ensure_dirs() -> None:
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     ensure_dirs()
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+
+
+@contextmanager
+def guard_lock():
+    """Serialize pause/enforce/resume across timers and external monitors."""
+    ensure_dirs()
+    with LOCK_PATH.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def append_event(event: str, **payload: Any) -> None:
@@ -438,6 +465,13 @@ def merge_groups(
 def schedule_resume(pause_until_epoch: float) -> dict[str, Any]:
     delay = max(1, int(pause_until_epoch - time.time()))
     unit = f"ollama-limit-auto-resume-{int(pause_until_epoch)}"
+    existing = run(["systemctl", "--user", "is-active", f"{unit}.timer"])
+    if existing.returncode == 0:
+        return {
+            "method": "existing_systemd_user_timer",
+            "unit": unit,
+            "delay_seconds": delay,
+        }
     command = [
         "systemd-run",
         "--user",
@@ -474,6 +508,33 @@ def schedule_resume(pause_until_epoch: float) -> dict[str, Any]:
 
 
 def schedule_enforce(delay: int = 60) -> dict[str, Any]:
+    active = run(
+        [
+            "systemctl",
+            "--user",
+            "list-timers",
+            "--all",
+            "--no-legend",
+            "--no-pager",
+        ]
+    )
+    if active.returncode == 0:
+        for line in active.stdout.splitlines():
+            if line.lstrip().startswith("-"):
+                continue
+            fields = line.split()
+            timers = [
+                field
+                for field in fields
+                if field.startswith("ollama-limit-enforce-")
+                and field.endswith(".timer")
+            ]
+            if timers:
+                return {
+                    "method": "existing_systemd_user_timer",
+                    "unit": timers[0].removesuffix(".timer"),
+                    "delay_seconds": max(5, int(delay)),
+                }
     unit = f"ollama-limit-enforce-{time.time_ns()}"
     command = [
         "systemd-run",
@@ -704,11 +765,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     if args.command == "pause":
-        result = pause(args)
+        with guard_lock():
+            result = pause(args)
     elif args.command == "enforce":
-        result = enforce()
+        with guard_lock():
+            result = enforce()
     elif args.command == "resume":
-        result = resume(force=args.force)
+        with guard_lock():
+            result = resume(force=args.force)
     else:
         result = status()
         if args.command == "inventory":
