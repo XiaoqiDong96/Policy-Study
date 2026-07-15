@@ -1285,6 +1285,16 @@ def extract_json_object(text: str) -> Dict[str, Any]:
             return json.loads(candidate)
         except json.JSONDecodeError:
             pass
+        # Some cloud models return one valid JSON object followed by a second
+        # object or a short explanation despite the one-object instruction.
+        # Accept the first complete object; raw_decode still rejects a broken
+        # or truncated first object, which then falls through to repair logic.
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(candidate.lstrip())
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
         repaired_obj = repair_with_json_repair(candidate)
         if repaired_obj is not None:
             return repaired_obj

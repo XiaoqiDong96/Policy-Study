@@ -1,0 +1,2 @@
+# The queue and included workers use the Python standard library.
+# Legacy office/PDF extraction relies on host utilities documented in README.md.

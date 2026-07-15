@@ -29,6 +29,83 @@ count_lines() {
   fi
 }
 
+audit_tool_output() {
+  python3 - "$FINAL_YES" "$TOOL_OUT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+expected_path, output_path = map(Path, sys.argv[1:])
+expected_ids = []
+with expected_path.open(encoding="utf-8") as handle:
+    for line in handle:
+        row = json.loads(line)
+        expected_ids.append(str(row.get("id", "")).strip())
+expected = {value for value in expected_ids if value}
+
+valid = set()
+invalid = 0
+duplicates = 0
+if output_path.is_file():
+    with output_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                invalid += 1
+                continue
+            record_id = str(row.get("id", "")).strip()
+            if not record_id or record_id not in expected or row.get("tool_error"):
+                invalid += 1
+                continue
+            if record_id in valid:
+                duplicates += 1
+            valid.add(record_id)
+
+missing = len(expected - valid)
+print(f"{len(expected)}|{len(valid)}|{invalid}|{duplicates}|{missing}")
+PY
+}
+
+clean_tool_output() {
+  python3 - "$FINAL_YES" "$TOOL_OUT" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+expected_path, output_path = map(Path, sys.argv[1:])
+expected_ids = []
+with expected_path.open(encoding="utf-8") as handle:
+    for line in handle:
+        row = json.loads(line)
+        record_id = str(row.get("id", "")).strip()
+        if record_id:
+            expected_ids.append(record_id)
+expected = set(expected_ids)
+
+valid = {}
+if output_path.is_file():
+    with output_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            record_id = str(row.get("id", "")).strip()
+            if record_id in expected and not row.get("tool_error"):
+                valid[record_id] = row
+
+temporary = output_path.with_suffix(output_path.suffix + ".clean.tmp")
+with temporary.open("w", encoding="utf-8") as handle:
+    for record_id in expected_ids:
+        if record_id in valid:
+            handle.write(json.dumps(valid[record_id], ensure_ascii=False) + "\n")
+os.replace(temporary, output_path)
+print(len(valid))
+PY
+}
+
 log_msg() {
   echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" | tee -a "$LOG"
 }
@@ -73,17 +150,31 @@ if [[ "$YES_TOTAL" == "0" ]]; then
   exit 0
 fi
 
-while [[ "$(count_lines "$TOOL_OUT")" -lt "$YES_TOTAL" ]]; do
-  tool_done="$(count_lines "$TOOL_OUT")"
-  log_msg "Tool refinement waiting: $tool_done/$YES_TOTAL"
-  if ! tmux has-session -t "${DOMAIN_KEY}_tool_refine" 2>/dev/null; then
-    log_msg "Tool refinement tmux missing; launching resumable tool refinement."
-    DOMAIN_KEY="$DOMAIN_KEY" DOMAIN_LABEL="$DOMAIN_LABEL" OUTPUT_ROOT="$OUTPUT_ROOT" \
-      bash outputs/cloud_runbooks/start_domain_tool_refinement.sh >> "$LOG" 2>&1 || true
+while true; do
+  IFS='|' read -r expected_unique valid_count invalid_count duplicate_count missing_count \
+    <<< "$(audit_tool_output)"
+  if [[ "$expected_unique" -ne "$YES_TOTAL" ]]; then
+    log_msg "ERROR: final-yes ids are not unique: lines=$YES_TOTAL unique=$expected_unique"
+    exit 4
   fi
+  if tmux has-session -t "${DOMAIN_KEY}_tool_refine" 2>/dev/null; then
+    log_msg "Tool refinement waiting: valid=$valid_count/$YES_TOTAL invalid=$invalid_count duplicates=$duplicate_count missing=$missing_count"
+    sleep 120
+    continue
+  fi
+  if [[ "$valid_count" -eq "$YES_TOTAL" && "$invalid_count" -eq 0 && "$duplicate_count" -eq 0 && "$missing_count" -eq 0 ]]; then
+    break
+  fi
+  if [[ "$invalid_count" -gt 0 || "$duplicate_count" -gt 0 ]]; then
+    cleaned="$(clean_tool_output)"
+    log_msg "Removed invalid/error/duplicate tool rows; retained=$cleaned/$YES_TOTAL."
+  fi
+  log_msg "Tool refinement incomplete; launching resumable retry."
+  DOMAIN_KEY="$DOMAIN_KEY" DOMAIN_LABEL="$DOMAIN_LABEL" OUTPUT_ROOT="$OUTPUT_ROOT" \
+    bash outputs/cloud_runbooks/start_domain_tool_refinement.sh >> "$LOG" 2>&1 || true
   sleep 120
 done
-log_msg "Tool refinement complete: $(count_lines "$TOOL_OUT")/$YES_TOTAL"
+log_msg "Tool refinement complete and error-free: $YES_TOTAL/$YES_TOTAL"
 
 log_msg "Building culture province-category panels."
 DOMAIN_KEY="$DOMAIN_KEY" OUTPUT_ROOT="$OUTPUT_ROOT" \

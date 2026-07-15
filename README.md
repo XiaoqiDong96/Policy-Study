@@ -112,7 +112,17 @@ National, provincial, and prefecture policies are kept as separate panels. A nat
 
 Start with [Extending to a New Industry](docs/EXTENDING_TO_A_NEW_INDUSTRY.md). Define the domain taxonomy and exclusion boundary first, audit a sample of deterministic screening results, then configure the shared LLM and panel stages.
 
+## Optional downstream queue example
+
+[`examples/tech_soft_power_queue`](examples/tech_soft_power_queue) shows how a
+separate 297-city research project can wait for this repository's completed
+cultural-industry workflow, import only explicitly mapped prefecture policies,
+and run a resumable task queue with dependency and output gates.  The example
+uses `PROJECT_ROOT`, `POLICY_PROJECT`, and `PYTHON` environment variables; it
+contains no corpus, classifications, panels, logs, credentials, or host-specific
+configuration.  See [the autonomous queue guide](docs/TECH_SOFT_POWER_AUTONOMOUS_QUEUE.md)
+for status semantics and recovery behavior.
+
 ## Public repository boundary
 
 Only code, small synthetic fixtures, and public documentation belong here. Keep all original documents, candidate packages, classifications, panels, logs, model caches, credentials, and execution-specific paths outside the repository.
-
