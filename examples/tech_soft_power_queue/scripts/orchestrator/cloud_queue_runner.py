@@ -69,7 +69,13 @@ def norm_code(value: Any) -> str:
 
 
 class QueueRunner:
-    def __init__(self, project_root: Path, manifest_path: Path) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        manifest_path: Path,
+        *,
+        recover_stale_running: bool = True,
+    ) -> None:
         self.project_root = project_root.resolve()
         self.manifest_path = manifest_path.resolve()
         self.manifest = read_json(self.manifest_path)
@@ -81,6 +87,7 @@ class QueueRunner:
         self.log_dir = self.runtime_dir / "logs"
         self.lock_path = self.runtime_dir / "runner.lock"
         self.stop_requested = False
+        self.recover_stale_running = recover_stale_running
         self.task_map = {
             task["task_id"]: task for task in self.manifest.get("tasks", [])
         }
@@ -121,6 +128,19 @@ class QueueRunner:
                     raise RuntimeError(
                         f"Each command must be a non-empty argv list: {task['task_id']}"
                     )
+        post_completion = self.manifest.get("post_completion")
+        if post_completion is not None:
+            if not isinstance(post_completion, dict):
+                raise RuntimeError("post_completion must be an object")
+            commands = post_completion.get("commands", [])
+            gates = post_completion.get("gates", [])
+            if not commands or not gates:
+                raise RuntimeError("post_completion requires commands and gates")
+            for command in commands:
+                if not isinstance(command, list) or not command:
+                    raise RuntimeError(
+                        "Each post_completion command must be a non-empty argv list"
+                    )
 
     def _load_state(self) -> dict[str, Any]:
         if self.state_path.is_file():
@@ -151,10 +171,28 @@ class QueueRunner:
                 },
             )
             entry["worker_status"] = task.get("worker_status")
-            if entry.get("status") == "RUNNING":
+            if self.recover_stale_running and entry.get("status") == "RUNNING":
                 entry["status"] = "PENDING_RECOVERY"
                 entry["last_error"] = "runner restarted while task was RUNNING"
                 entry["next_run_epoch"] = 0
+        if self.manifest.get("post_completion"):
+            post = state.setdefault(
+                "post_completion",
+                {
+                    "status": "PENDING",
+                    "attempts": 0,
+                    "next_run_epoch": 0,
+                    "last_started_at_utc": None,
+                    "last_finished_at_utc": None,
+                    "last_exit_code": None,
+                    "last_error": "",
+                    "last_gate_results": [],
+                },
+            )
+            if self.recover_stale_running and post.get("status") == "RUNNING":
+                post["status"] = "PENDING_RECOVERY"
+                post["last_error"] = "runner restarted during post-completion finalization"
+                post["next_run_epoch"] = 0
         return state
 
     def _expand_command(self, command: list[Any]) -> list[str]:
@@ -276,14 +314,40 @@ class QueueRunner:
                 entry["status"] = "PENDING_RECOVERY"
                 entry["last_error"] = "previous COMPLETE state failed current output gates"
                 entry["next_run_epoch"] = 0
+        post_spec = self.manifest.get("post_completion")
+        post = self.state.get("post_completion")
+        if post_spec and post:
+            if not self._tasks_complete() and post.get("status") == "COMPLETE":
+                post["status"] = "PENDING_RECOVERY"
+                post["last_error"] = "an upstream task returned to recovery"
+                post["next_run_epoch"] = 0
+            elif post.get("status") == "COMPLETE":
+                gates = self.evaluate_gates(post_spec)
+                post["last_gate_results"] = gates
+                if not gates or not all(item["passed"] for item in gates):
+                    post["status"] = "PENDING_RECOVERY"
+                    post["last_error"] = "post-completion output gates no longer pass"
+                    post["next_run_epoch"] = 0
+
+    def _tasks_complete(self) -> bool:
+        statuses = [entry["status"] for entry in self.state["tasks"].values()]
+        return bool(statuses) and all(status in SUCCESS_STATES for status in statuses)
 
     def _save_state(self) -> None:
         self._sync_manifest_state()
         statuses = [entry["status"] for entry in self.state["tasks"].values()]
-        if statuses and all(status in SUCCESS_STATES for status in statuses):
+        post = self.state.get("post_completion")
+        post_complete = not self.manifest.get("post_completion") or (
+            post and post.get("status") == "COMPLETE"
+        )
+        if statuses and all(status in SUCCESS_STATES for status in statuses) and post_complete:
             overall = "COMPLETE"
-        elif any(status in ACTIVE_STATES for status in statuses):
+        elif any(status in ACTIVE_STATES for status in statuses) or (
+            post and post.get("status") == "RUNNING"
+        ):
             overall = "RUNNING"
+        elif statuses and all(status in SUCCESS_STATES for status in statuses):
+            overall = "FINALIZING"
         else:
             overall = "IN_PROGRESS"
         self.state["overall_status"] = overall
@@ -329,6 +393,7 @@ class QueueRunner:
             f"- Updated (UTC): {self.state['updated_at_utc']}",
             f"- Runner PID: {self.state['runner_pid']}",
             f"- Counts: {json.dumps(counts, ensure_ascii=False, sort_keys=True)}",
+            f"- Post-completion: {self.state.get('post_completion', {}).get('status', 'not_configured')}",
             "",
             "| Task | Status | Worker | Attempts | Last error |",
             "|---|---|---|---:|---|",
@@ -438,6 +503,49 @@ class QueueRunner:
         entry["last_error"] = error
         entry["next_run_epoch"] = time.time() + delay
 
+    def run_post_completion(self) -> bool:
+        spec = self.manifest.get("post_completion")
+        entry = self.state.get("post_completion")
+        if not spec or not entry or not self._tasks_complete():
+            return False
+        if entry.get("status") == "COMPLETE":
+            return False
+        if float(entry.get("next_run_epoch", 0) or 0) > time.time():
+            return False
+        entry["status"] = "RUNNING"
+        entry["attempts"] = int(entry.get("attempts", 0)) + 1
+        entry["last_started_at_utc"] = utc_now()
+        entry["last_error"] = ""
+        self._save_state()
+        exit_code = 0
+        for raw_command in spec.get("commands", []):
+            exit_code = self._run_command(
+                "POST_COMPLETION",
+                self._expand_command(raw_command),
+                int(spec.get("timeout_seconds", 0) or 0),
+            )
+            if exit_code != 0:
+                break
+        entry["last_exit_code"] = exit_code
+        entry["last_finished_at_utc"] = utc_now()
+        if exit_code != 0:
+            self._schedule_retry(entry, f"post-completion command exited {exit_code}")
+        else:
+            gates = self.evaluate_gates(spec)
+            entry["last_gate_results"] = gates
+            if gates and all(item["passed"] for item in gates):
+                entry["status"] = "COMPLETE"
+                entry["last_error"] = ""
+                entry["next_run_epoch"] = 0
+            else:
+                failed = [item["detail"] for item in gates if not item["passed"]]
+                self._schedule_retry(
+                    entry,
+                    "post-completion output gate failed: " + "; ".join(failed),
+                )
+        self._save_state()
+        return True
+
     def next_runnable_task(self) -> str | None:
         now = time.time()
         for task_id, task in sorted(
@@ -482,11 +590,14 @@ class QueueRunner:
         poll_seconds = int(self.manifest.get("poll_seconds", 60))
         while not self.stop_requested:
             ran = self.run_once()
+            if self.state["overall_status"] != "COMPLETE" and self.complete_flag.exists():
+                self.complete_flag.unlink()
+            finalized = self.run_post_completion()
             if self.state["overall_status"] == "COMPLETE":
                 self.complete_flag.write_text(utc_now() + "\n", encoding="utf-8")
                 self._save_state()
                 return 0
-            if not ran:
+            if not ran and not finalized:
                 # Keep systemd stop/restart responsive even though Python may
                 # transparently resume a long sleep after the signal handler.
                 for _ in range(max(1, poll_seconds)):

@@ -112,13 +112,43 @@ def joint_issuance(value: str) -> int:
     return int(bool(explicit_joint_departments(value)))
 
 
+def split_top_level_departments(value: str) -> list[str]:
+    """Split issuer delimiters only when they are outside parentheses."""
+    text = clean(value)
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for character in text:
+        if character in "(（":
+            depth += 1
+            current.append(character)
+        elif character in ")）":
+            depth = max(0, depth - 1)
+            current.append(character)
+        elif character in "|;,，；、" and depth == 0:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+        else:
+            current.append(character)
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
+    return parts
+
+
 def explicit_joint_departments(value: str) -> list[str]:
     """Accept only short, explicit issuer lists; reject aggregated/corrupt fields."""
-    text = re.sub(r"（[^）]*）|\([^)]*\)", "", clean(value))
+    # Parenthetical text can be a legally meaningful geographic qualifier
+    # (for example, ``中国(广东)自由贸易试验区工作办公室``).  Keep it verbatim;
+    # a parenthetical alias is still one issuer and must not be split into a
+    # synthetic second department.
+    text = clean(value)
     raw = [
-        part.strip()
-        for part in re.split(r"[|;,，；、]+", text)
-        if part.strip() and not re.search(r"其他机构|有关部门", part)
+        part
+        for part in split_top_level_departments(text)
+        if not re.search(r"其他机构|有关部门", part)
     ]
     if not 2 <= len(raw) <= 5:
         return []
@@ -172,7 +202,10 @@ def main() -> int:
 
     output: list[dict[str, Any]] = []
     joint_edges: list[dict[str, Any]] = []
-    joint_edge_keys: set[tuple[str, str, str, str]] = set()
+    # Completed domain corpora may overlap.  A source document and unordered
+    # issuer pair is one evidence edge even when the same document appears in
+    # more than one topical source corpus.
+    joint_edge_keys: set[tuple[str, str, str]] = set()
     baseline_city_year: set[tuple[str, int]] = set()
     source_counts: Counter[str] = Counter()
     for domain, path in sources:
@@ -216,7 +249,7 @@ def main() -> int:
             source_file = str(path.relative_to(project if str(path).startswith(str(project)) else policy_project))
             for department_a, department_b in combinations(departments, 2):
                 department_a, department_b = sorted((department_a, department_b))
-                edge_key = (domain, source_id, department_a, department_b)
+                edge_key = (source_id, department_a, department_b)
                 if edge_key in joint_edge_keys:
                     continue
                 joint_edge_keys.add(edge_key)

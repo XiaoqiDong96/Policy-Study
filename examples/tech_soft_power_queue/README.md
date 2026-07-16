@@ -87,6 +87,11 @@ The service is single-worker by design.  This keeps memory use predictable on
 small cloud instances while the external policy pipeline can continue
 independently.
 
+The manifest also declares a gated `post_completion` step.  After every task
+has reached an accepted state, the queue reruns the finalizer against the
+completed state snapshot before writing the completion flag.  If that command
+or any post-completion gate fails, it remains in the retry loop.
+
 Run the synthetic queue tests with:
 
 ```bash
@@ -97,7 +102,7 @@ python -m unittest discover -s tests -v
 
 Runtime state and logs are written under `10_qc/orchestrator/`.  The queue is
 accepted only when every task is `COMPLETE` or `SKIPPED_WITH_EVIDENCE` and the
-finalizer writes:
+post-completion finalizer passes its own gates and writes:
 
 - `all_tasks_complete.flag`
 - `final_acceptance.json`

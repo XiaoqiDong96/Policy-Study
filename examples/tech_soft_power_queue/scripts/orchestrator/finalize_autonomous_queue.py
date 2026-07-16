@@ -64,7 +64,10 @@ def main() -> int:
     args = parse_args()
     root = args.project_root.resolve()
     manifest = args.manifest or root / "scripts/orchestrator/task_manifest.json"
-    runner = QueueRunner(root, manifest)
+    # This process is launched by CR16 while the parent queue legitimately
+    # records CR16 as RUNNING.  Load that state for auditing without applying
+    # the queue-startup stale-RUNNING recovery rule.
+    runner = QueueRunner(root, manifest, recover_stale_running=False)
     self_outputs = {
         (root / "10_qc/orchestrator/final_acceptance.json").resolve(),
         (root / "10_qc/orchestrator/final_output_inventory.csv").resolve(),

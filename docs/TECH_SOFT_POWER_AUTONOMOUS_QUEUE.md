@@ -25,6 +25,8 @@
 
 `10_qc/orchestrator/all_tasks_complete.flag`
 
+清单中的 `post_completion` 是独立的最终门禁。全部任务先进入可接受状态，调度器再基于终态重跑 finalizer；只有最终验收文件通过门禁，才写完成旗标。该步骤失败时同样无限退避重试，不需要人工补写终态快照。
+
 ## 运行与状态
 
 云端项目根目录通过 `PROJECT_ROOT` 设置，政策项目通过 `POLICY_PROJECT` 设置，不在代码中写死服务器地址、账号或密钥。
